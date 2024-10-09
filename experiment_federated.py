@@ -19,6 +19,12 @@ def run_exp(dataset_name, model_name, dd_type,
     print('Attack Type:', attack_type)
     print('Attackers Ratio:', np.round(attackers_ratio*100, 2), '%')
     print('Malicious Behavior Rate:', malicious_behavior_rate*100, '%')
+    logging.info('Data set: %s', dataset_name)
+    logging.info('Data distribution: %s', dd_type)
+    logging.info('Aggregation rule: %s', rule)
+    logging.info('Attack Type: %s', attack_type)
+    logging.info('Attackers Ratio: %.2f%%', attackers_ratio * 100)
+    logging.info('Malicious Behavior Rate: %.2f%%', malicious_behavior_rate * 100)
     # flEnv.simulate(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate,
     #                 from_class = from_class, to_class = to_class,
     #                  rule=rule)

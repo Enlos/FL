@@ -3,16 +3,20 @@ import enum
 import torch
 import numpy as np
 import math
+from collections import defaultdict
+from hdbscan import HDBSCAN
 from scipy import stats
 from functools import reduce
 import time
 import sklearn.metrics.pairwise as smp
+from scipy.special import rel_entr
 import hdbscan
 from scipy.spatial.distance import cdist
 from scipy.stats import entropy
 from sklearn.cluster import KMeans
-from utils import *
+from sklearn.preprocessing import StandardScaler
 
+from utils import *
 
 
 def get_pca(data, threshold = 0.99):
@@ -32,11 +36,12 @@ eps = np.finfo(float).eps
 class LFD():
     def __init__(self, num_classes):
         self.memory = np.zeros([num_classes])
-    
+
     def clusters_dissimilarity(self, clusters):
+
         n0 = len(clusters[0])
         n1 = len(clusters[1])
-        m = n0 + n1 
+        m = n0 + n1
         cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
         cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
         mincs0 = np.min(cs0, axis=1)
@@ -46,6 +51,8 @@ class LFD():
         return ds0, ds1
 
     def aggregate(self, global_model, local_models, ptypes):
+
+        #原方案：
         local_weights = [copy.deepcopy(model).state_dict() for model in local_models]
         m = len(local_models)
         for i in range(m):
@@ -55,7 +62,7 @@ class LFD():
         db = [None for i in range(m)]
         for i in range(m):
             dw[i]= global_model[-2].cpu().data.numpy() - \
-                local_models[i][-2].cpu().data.numpy() 
+                local_models[i][-2].cpu().data.numpy()
             db[i]= global_model[-1].cpu().data.numpy() - \
                 local_models[i][-1].cpu().data.numpy()
         dw = np.asarray(dw)
@@ -66,13 +73,15 @@ class LFD():
             data = []
             for i in range(m):
                 data.append(dw[i].reshape(-1))
-        
+
             kmeans = KMeans(n_clusters=2, random_state=0).fit(data)
             labels = kmeans.labels_
 
             clusters = {0:[], 1:[]}
             for i, l in enumerate(labels):
                 clusters[l].append(data[i])
+
+
 
             good_cl = 0
             cs0, cs1 = self.clusters_dissimilarity(clusters)
@@ -87,12 +96,12 @@ class LFD():
                 # print(ptypes[i], 'Cluster:', l)
                 if l != good_cl:
                     scores[i] = 0
-                
+
             global_weights = average_weights(local_weights, scores)
             return global_weights
 
         "For multiclassification models"
-        norms = np.linalg.norm(dw, axis = -1) 
+        norms = np.linalg.norm(dw, axis = -1)
         self.memory = np.sum(norms, axis = 0)
         self.memory +=np.sum(abs(db), axis = 0)
         max_two_freq_classes = self.memory.argsort()[-2:]
@@ -108,6 +117,7 @@ class LFD():
         for i, l in enumerate(labels):
           clusters[l].append(data[i])
 
+
         good_cl = 0
         cs0, cs1 = self.clusters_dissimilarity(clusters)
         if cs0 < cs1:
@@ -121,9 +131,12 @@ class LFD():
             # print(ptypes[i], 'Cluster:', l)
             if l != good_cl:
                 scores[i] = 0
-            
+
         global_weights = average_weights(local_weights, scores)
         return global_weights
+
+
+
 
 ################################################
 # Takes in grad
@@ -161,7 +174,7 @@ class FoolsGold:
         self.memory = None
         self.wv_history = []
         self.num_peers = num_peers
-       
+
     def score_gradients(self, local_grads, selectec_peers):
         m = len(local_grads)
         grad_len = np.array(local_grads[0][-2].cpu().data.numpy().shape).prod()
@@ -181,7 +194,7 @@ class FoolsGold:
 class Tolpegin:
     def __init__(self):
         pass
-    
+
     def score(self, global_model, local_models, peers_types, selected_peers):
         global_model = list(global_model.parameters())
         last_g = global_model[-2].cpu().data.numpy()
@@ -191,7 +204,7 @@ class Tolpegin:
             grad= (last_g - \
                     list(local_models[i].parameters())[-2].cpu().data.numpy())
             grads[i] = grad
-        
+
         grads = np.array(grads)
         num_classes = grad.shape[0]
         # print('Number of classes:', num_classes)
@@ -204,7 +217,7 @@ class Tolpegin:
             cl = kmeans.cluster_centers_
             dist.append(((cl[0] - cl[1])**2).sum())
             labels.append(kmeans.labels_)
-        
+
         dist = np.array(dist)
         candidate_class = dist.argmax()
         print("Candidate source/target class", candidate_class)
@@ -213,7 +226,7 @@ class Tolpegin:
             scores = 1 - labels
         else:
             scores = labels
-        
+
         for i, pt in enumerate(peers_types):
             print(pt, 'scored', scores[i])
         return scores
@@ -226,7 +239,7 @@ def clipp_model(g_w, w, gamma =  1):
 def FLAME(global_model, local_models, noise_scalar):
     # Compute number of local models
     m = len(local_models)
-    
+
     # Flattent local models
     g_m = np.array([torch.nn.utils.parameters_to_vector(global_model.parameters()).cpu().data.numpy()])
     f_m = np.array([torch.nn.utils.parameters_to_vector(model.parameters()).cpu().data.numpy() for model in local_models])
@@ -234,7 +247,7 @@ def FLAME(global_model, local_models, noise_scalar):
     # Compute model-wise cosine similarity
     cs = smp.cosine_similarity(grads)
     # Compute the minimum cluster size value
-    msc = int(m*0.5) + 1 
+    msc = int(m*0.5) + 1
     # Apply HDBSCAN on the computed cosine similarities
     clusterer = hdbscan.HDBSCAN(min_cluster_size=msc, min_samples=1, allow_single_cluster = True)
     clusterer.fit(cs)
@@ -246,7 +259,7 @@ def FLAME(global_model, local_models, noise_scalar):
         benign_idxs = np.arange(m)
     else:
         benign_idxs = np.where(labels!=-1)[0]
-        
+
     # Compute euclidean distances to the current global model
     euc_d = cdist(g_m, f_m)[0]
     # Identify the median of computed distances
@@ -256,16 +269,16 @@ def FLAME(global_model, local_models, noise_scalar):
     for i, idx in enumerate(benign_idxs):
         w_c = clipp_model(global_model.state_dict(), local_models[idx].state_dict(), gamma =  st/euc_d[idx])
         W_c.append(w_c)
-    
+
     # Average admitted clipped updates to obtain a new global model
     g_w = average_weights(W_c, np.ones(len(W_c)))
-    
+
     '''From the original paper: {We use standard DP parameters and set eps = 3705 for IC, 
     eps = 395 for the NIDS and eps = 4191 for the NLP scenario. 
     Accordingly, lambda = 0.001 for IC and NLP, and lambda = 0.01 for the NIDS scenario.}
     However, we found lambda = 0.001 with the CIFAR10-ResNet18 benchmark spoils the model
     and therefore we tried lower lambda values, which correspond to greater eps values.'''
-    
+
     # Add adaptive noise to the global model
     lamb = 0.001
     sigma = lamb*st*noise_scalar
@@ -273,8 +286,8 @@ def FLAME(global_model, local_models, noise_scalar):
     for key in g_w.keys():
         noise = torch.FloatTensor(g_w[key].shape).normal_(mean=0, std=(sigma**2)).to(g_w[key].device)
         g_w[key] = g_w[key] + noise
-        
-    return g_w 
+
+    return g_w
 #################################################################################################################
 
 def median_opt(input):
@@ -371,7 +384,7 @@ def Repeated_Median(w):
 
     print('repeated median aggregation took {}s'.format(time.time() - cur_time))
     return w_med
-        
+
 # simple median estimator
 def simple_median(w):
     device = w[0][list(w[0].keys())[0]].device
@@ -395,7 +408,7 @@ def simple_median(w):
 def trimmed_mean(w, trim_ratio):
     if trim_ratio == 0:
         return average_weights(w, [1 for i in range(len(w))])
-        
+
     assert trim_ratio < 0.5, 'trim ratio is {}, but it should be less than 0.5'.format(trim_ratio)
     trim_num = int(trim_ratio * len(w))
     device = w[0][list(w[0].keys())[0]].device
@@ -419,20 +432,26 @@ def trimmed_mean(w, trim_ratio):
     return w_med
 
 
-# Get average weights
+
+
 def average_weights(w, marks):
-    """
-    Returns the average of the weights.
-    """
     w_avg = copy.deepcopy(w[0])
+
+    # Step 1: 计算加权平均
     for key in w_avg.keys():
         w_avg[key] = w_avg[key] * marks[0]
     for key in w_avg.keys():
         for i in range(1, len(w)):
             w_avg[key] += w[i][key] * marks[i]
-        w_avg[key] = w_avg[key] *(1/sum(marks))
+        w_avg[key] = w_avg[key] * (1 / sum(marks))
+
+    # if total_w_all_users is not None and epoch is not None:
+    #     class_means, class_stds = calculate_mean_std(total_w_all_users)
+    # print(f"Epoch {epoch}: Class means: {class_means}")
+    # print(f"Epoch {epoch}: Class stds: {class_stds}")
+
     return w_avg
-   
+
 def Krum(updates, f, multi = False):
     n = len(updates)
     updates = [torch.nn.utils.parameters_to_vector(update.parameters()) for update in updates]
@@ -450,3 +469,139 @@ def Krum(updates, f, multi = False):
     else:
       return idxs[0]
 ##################################################################
+
+
+# def calculate_mean_std(total_w_all_users):
+#     """
+#     计算每个类别在所有用户中的权重均值和方差
+#     """
+#     class_means = np.mean(total_w_all_users, axis=1)
+#     class_stds = np.std(total_w_all_users, axis=1)
+#     return class_means, class_stds
+#
+# def compute_w_stats(total_w_all_users):
+#     """
+#     计算所有用户w的均值和方差
+#     :param total_w_all_users: (num_classes, num_users) 形状的w矩阵
+#     :return: 每个类的均值和方差
+#     """
+#     mean_w = np.mean(total_w_all_users, axis=1)  # 按照用户轴计算均值
+#     std_w = np.std(total_w_all_users, axis=1)  # 按照用户轴计算标准差
+#     return mean_w, std_w
+
+def NeuDFL(w, marks, avg_w_all, epoch, total_w_all_users, num_users,peers):
+    """
+    Custom aggregation function that filters out the users with the smallest w values in the most likely attacked class.
+    """
+    # Step 1: Calculate the average w values across all users for this epoch
+    attacked_class_idx = np.argmin(avg_w_all)
+    print(f"Potentially attacked class in epoch {epoch + 1}: Class {attacked_class_idx }")
+
+    # Step 3: Extract w values for the identified attacked class
+    attacked_class_w = total_w_all_users[attacked_class_idx, :]
+
+    # Step 3: 计算该类别的均值和方差
+    mean_attacked_class_w = np.mean(attacked_class_w)
+    std_attacked_class_w = np.std(attacked_class_w)
+
+    threshold = mean_attacked_class_w - 0.5 * std_attacked_class_w  # 可根据需求调整权重
+    print(f"Mean w of attacked class: {mean_attacked_class_w}")
+    print(f"Std w of attacked class: {std_attacked_class_w}")
+    print(f"Threshold for filtering: {threshold}")
+
+    # Step 5: 过滤掉在该攻击类别中，表现不佳的用户（即 w 值小于阈值的用户）
+    filtered_users_indices = np.where(attacked_class_w < threshold)[0]
+
+    # Step 6: 获取实际的恶意用户 ID
+    detected_malicious_users = [peers[i].peer_pseudonym for i in filtered_users_indices]
+    actual_malicious_users = [peer.peer_pseudonym for peer in peers if peer.peer_type == 'attacker']
+
+    for i in filtered_users_indices:
+        marks[i] = 0
+
+    # Step 6: Perform weighted aggregation
+    w_avg = copy.deepcopy(w[0])
+    for key in w_avg.keys():
+        w_avg[key] = w_avg[key] * marks[0]
+    for key in w_avg.keys():
+        for i in range(1, len(w)):
+            w_avg[key] += w[i][key] * marks[i]
+        w_avg[key] = w_avg[key] * (1 / max(1, sum(marks)))
+
+    return w_avg, detected_malicious_users, actual_malicious_users,attacked_class_idx
+    #
+
+    # # Step 2: 计算每个用户的 w 值的均值和方差
+    # user_means = np.mean(total_w_all_users, axis=0)  # 每个用户的 w 均值
+    # user_stds = np.std(total_w_all_users, axis=0)    # 每个用户的 w 方差
+    #
+    # mean_w_all_users = np.mean(user_means)
+    # std_w_all_users = np.std(user_stds)
+    #
+    # threshold = mean_w_all_users + std_w_all_users * 0.5
+    # print(f"Mean of w values: {mean_w_all_users}")
+    # print(f"Std of w values: {std_w_all_users}")
+    # print(f"Threshold for filtering: {threshold}")
+
+
+
+    # kl_divergences = np.zeros(num_users)
+    # for user_idx in range(num_users):
+    #     user_weights = total_w_all_users[:, user_idx]
+    #     kl_divergences[user_idx] = compute_kl_divergence(user_weights, avg_w_all)
+        #print(f"KL Divergence for User {user_idx} in Epoch {epoch + 1}: {kl_divergences[user_idx]}")
+
+
+    # kl_divergences_mean = np.mean(kl_divergences)
+    # kl_divergences_std =  np.std(kl_divergences)
+    # threshold = kl_divergences_mean + kl_divergences_std *0.5 # 动态阈值
+    # print(f"KL Divergence mean: {kl_divergences_mean}")
+    # print(f"KL Divergence std: {kl_divergences_std}")
+    # print(f"KL Divergence Threshold: {threshold}")
+
+    # Step 4: Find users with KL divergence higher than threshold (based on user index)
+    # filtered_users_indices = np.where(user_means > threshold)[0]
+
+    # print(f"Epoch {epoch + 1}: Detected malicious users: {detected_malicious_users}")
+    # print(f"Epoch {epoch + 1}: Actual malicious users: {actual_malicious_users}")
+
+
+    # # Step 4: Identify the users with the smallest w values in the attacked class
+    # sorted_indices = np.argsort(attacked_class_w)
+    # num_users_to_filter = max(1, int(num_users * 0.2))  # Filter 20% of the users
+    # filtered_users = sorted_indices[:num_users_to_filter]
+    #
+    # # Step 5: Set the marks of filtered users to 0 to exclude them from aggregation
+    # for i in filtered_users:
+    #     marks[i] = 0
+
+# def NeuDFL(w, marks, avg_w_all, threshold):
+#     min_sum_marks = 1;
+#
+#
+#     # Step 1: Identify the most likely attacked class (使用直接比较而非绝对值)
+#     attacked_class_idx = np.argmin(avg_w_all)  # 找到最小的类别（可能被攻击的类别）
+#     print("Attacked class is" + attacked_class_idx)
+#
+#     # Step 2: Calculate dynamic threshold for the attacked class
+#     attacked_class_w = avg_w_all[attacked_class_idx]
+#     std_dev = np.std(attacked_class_w)
+#     dynamic_threshold = attacked_class_w + threshold * std_dev  # 这里改为 +，因为是最小值
+#         # Step 3: Filter out malicious users based on the dynamic threshold
+#     for i in range(len(w)):
+#         peer_class_w = np.array([np.sum(param.cpu().data.numpy()) for param in w[i].values()])
+#         peer_class_w = peer_class_w[attacked_class_idx]  # 获取该用户在被攻击类别上的 w 值
+#         if peer_class_w < dynamic_threshold:
+#             marks[i] = 0  # Filter out this peer by setting its weight to 0
+#
+#     # Step 4: Perform weighted aggregation
+#     w_avg = copy.deepcopy(w[0])
+#     for key in w_avg.keys():
+#         w_avg[key] = w_avg[key] * marks[0]
+#     for key in w_avg.keys():
+#         for i in range(1, len(w)):
+#             min_sum_marks = max(1, sum(marks))  # 防止 sum(marks) 为 0
+#             w_avg[key] += w[i][key] * marks[i]
+#         w_avg[key] = w_avg[key] * (1 / min_sum_marks)
+#
+#     return w_avg
